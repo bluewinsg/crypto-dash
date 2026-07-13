@@ -342,13 +342,27 @@ let watch = JSON.parse(localStorage.getItem("cdd_watch")||JSON.stringify(["BTC",
 async function api(path){
   let lastErr;
   for(const base of ENDPOINTS){
-    try{
-      const r = await fetch(base+path, {cache:"no-store"});
-      if(!r.ok){ lastErr = new Error(base+" -> HTTP "+r.status); continue; }
-      return await r.json();
-    }catch(e){ lastErr = e; }
+    let r;
+    try{ r = await fetch(base+path, {cache:"no-store"}); }
+    catch(e){ lastErr=e; continue; }                 // network error → try next endpoint
+    if(r.ok) return await r.json();
+    if(r.status>=400 && r.status<500 && r.status!==429) throw new Error("HTTP "+r.status); // bad symbol / geo → stop fast
+    lastErr = new Error("HTTP "+r.status);            // 5xx / 429 → try next endpoint
   }
   throw lastErr || new Error("network");
+}
+// spot-first, futures-fallback (perp-only coins like GWEI, 1000XEC have no spot pair)
+async function klines(pair,interval,limit){
+  try{ return await api(`/api/v3/klines?symbol=${pair}&interval=${interval}&limit=${limit}`); }
+  catch(e){ return await fapi(`/fapi/v1/klines?symbol=${pair}&interval=${interval}&limit=${limit}`); }
+}
+async function ticker24(pair){
+  try{ return await api(`/api/v3/ticker/24hr?symbol=${pair}`); }
+  catch(e){ return await fapi(`/fapi/v1/ticker/24hr?symbol=${pair}`); }
+}
+async function depthOf(pair,limit){
+  try{ return await api(`/api/v3/depth?symbol=${pair}&limit=${limit}`); }
+  catch(e){ return await fapi(`/fapi/v1/depth?symbol=${pair}&limit=${limit}`); }
 }
 async function fapi(path){
   const r = await fetch(FAPI+path,{cache:"no-store"});
@@ -479,9 +493,9 @@ async function load(){
   const err=document.getElementById("err");err.textContent="";
   try{
     const [tk,kl,dk] = await Promise.all([
-      api(`/api/v3/ticker/24hr?symbol=${pair}`),
-      api(`/api/v3/klines?symbol=${pair}&interval=${state.tf}&limit=400`),
-      api(`/api/v3/klines?symbol=${pair}&interval=1d&limit=3`)
+      ticker24(pair),
+      klines(pair,state.tf,400),
+      klines(pair,"1d",3)
     ]);
     // Futures data (optional — many coins have no USDT-perp, and it may be geo-restricted)
     let futRaw=null;
@@ -501,7 +515,7 @@ async function load(){
     loadDepth(sym);
     document.getElementById("ts").textContent=new Date().toLocaleTimeString();
   }catch(e){
-    err.textContent="Could not load "+pair+". Check the symbol (e.g. BTC, ETH, SOL) — it must trade against USDT on Binance. "+ (e.message||"");
+    err.textContent="Could not load "+pair+" on Binance spot or futures. Check the symbol, or Binance may be blocked on your network. "+ (e.message||"");
   }
 }
 
@@ -774,7 +788,7 @@ async function renderWatch(){
   body.querySelectorAll("tr").forEach(tr=>{tr.querySelector("td").onclick=()=>setSymbol(tr.dataset.s);});
   body.querySelectorAll("[data-del]").forEach(b=>b.onclick=(e)=>{e.stopPropagation();watch=watch.filter(x=>x!==b.dataset.del);localStorage.setItem("cdd_watch",JSON.stringify(watch));renderWatch();});
   // fetch prices
-  watch.forEach(async s=>{try{const tk=await api(`/api/v3/ticker/24hr?symbol=${s}${QUOTE}`);const el=document.getElementById("w_"+s);if(el){const chg=+tk.priceChangePercent;el.innerHTML=`$${fmt(+tk.lastPrice)} <span class="${chg>=0?'up':'down'}">${pct(chg)}</span>`;}}catch(e){}});
+  watch.forEach(async s=>{try{const tk=await ticker24(s+QUOTE);const el=document.getElementById("w_"+s);if(el){const chg=+tk.priceChangePercent;el.innerHTML=`$${fmt(+tk.lastPrice)} <span class="${chg>=0?'up':'down'}">${pct(chg)}</span>`;}}catch(e){}});
 }
 function addWatch(){const s=state.symbol;if(!watch.includes(s)){watch.push(s);localStorage.setItem("cdd_watch",JSON.stringify(watch));renderWatch();}}
 
@@ -826,9 +840,9 @@ function betaTo(coin,btc){const n=Math.min(coin.length,btc.length);if(n<3)return
 async function loadContext(sym){
   const tfs=["15m","1h","4h"];
   const res=await Promise.allSettled([
-    ...tfs.map(tf=>api(`/api/v3/klines?symbol=${sym}${QUOTE}&interval=${tf}&limit=240`)),
-    sym==="BTC"?Promise.resolve(null):api(`/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=120`),
-    sym==="BTC"?Promise.resolve(null):api(`/api/v3/klines?symbol=${sym}${QUOTE}&interval=1h&limit=120`),
+    ...tfs.map(tf=>klines(sym+QUOTE,tf,240)),
+    sym==="BTC"?Promise.resolve(null):klines("BTCUSDT","1h",120),
+    sym==="BTC"?Promise.resolve(null):klines(sym+QUOTE,"1h",120),
     jget("https://api.alternative.me/fng/?limit=1"),
     jget("https://api.coingecko.com/api/v3/global")
   ]);
@@ -866,7 +880,7 @@ function renderRegime(r){
 
 // ---- Order book depth ----
 async function loadDepth(sym){
-  try{ const d=await api(`/api/v3/depth?symbol=${sym}${QUOTE}&limit=100`); renderDepth(d); }
+  try{ const d=await depthOf(sym+QUOTE,100); renderDepth(d); }
   catch(e){ document.getElementById("depthBox").innerHTML='<div class="small muted">Order-book data unavailable for this pair.</div>'; }
 }
 function renderDepth(d){
