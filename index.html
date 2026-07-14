@@ -206,6 +206,10 @@
           <div><label>Account size ($)</label><input id="acct" type="number" value="1000"/></div>
           <div><label>Risk per trade (%)</label><input id="riskpct" type="number" value="1"/></div>
         </div>
+        <div class="grid2" style="margin-top:6px">
+          <div><label>Leverage (×)</label><input id="lev" type="number" value="5" min="1"/></div>
+          <div></div>
+        </div>
         <div id="sizeOut" class="small" style="margin-top:10px"></div>
       </div>
 
@@ -232,6 +236,7 @@
     <div class="card">
       <h3>Alerts <span class="small muted">— current coin</span></h3>
       <div id="alertBox"></div>
+      <div id="alertLog"></div>
     </div>
   </div>
 
@@ -334,7 +339,8 @@ const DEFAULT_TF = "1h";
 const QUICKS = ["BTC","ETH","SOL","BNB","XRP","DOGE","T","LINK","AVAX","ADA"];
 const TFS = [["1m","1m"],["5m","5m"],["15m","15m"],["1h","1h"],["4h","4h"],["1d","1d"]];
 
-let state = { symbol:"BTC", tf:DEFAULT_TF, timer:null };
+let state = { symbol:(localStorage.getItem("cdd_symbol")||"BTC"), tf:(localStorage.getItem("cdd_tf")||DEFAULT_TF), timer:null };
+let alertLog=JSON.parse(localStorage.getItem("cdd_alertlog")||"[]");
 let chart, candleSeries, volSeries, emaSeries={}, vwapSeries;
 let watch = JSON.parse(localStorage.getItem("cdd_watch")||JSON.stringify(["BTC","ETH","SOL"]));
 
@@ -364,6 +370,13 @@ async function depthOf(pair,limit){
   try{ return await api(`/api/v3/depth?symbol=${pair}&limit=${limit}`); }
   catch(e){ return await fapi(`/fapi/v1/depth?symbol=${pair}&limit=${limit}`); }
 }
+// short-lived cache so the funding/squeeze/movers scans don't refetch the same futures data
+const _fcache=new Map();
+async function fapiC(path,ttl){
+  const now=Date.now(), hit=_fcache.get(path);
+  if(hit && now-hit.t<(ttl||60000)) return hit.v;
+  const v=await fapi(path); _fcache.set(path,{t:now,v}); return v;
+}
 async function fapi(path){
   const r = await fetch(FAPI+path,{cache:"no-store"});
   if(!r.ok) throw new Error("HTTP "+r.status);
@@ -388,6 +401,8 @@ function macd(cl,f=12,s=26,sig=9){const ef=ema(cl,f),es=ema(cl,s);const line=cl.
 function bollinger(cl,p=20,m=2){const mid=sma(cl,p);const o=cl.map((_,i)=>{if(i<p-1)return null;let s=0;for(let j=i-p+1;j<=i;j++)s+=cl[j];const mean=s/p;let v=0;for(let j=i-p+1;j<=i;j++)v+=(cl[j]-mean)**2;const sd=Math.sqrt(v/p);return {mid:mean,up:mean+m*sd,lo:mean-m*sd,sd};});return o;}
 function atr(h,l,c,p=14){const tr=[];for(let i=0;i<c.length;i++){if(i===0){tr.push(h[i]-l[i]);}else{tr.push(Math.max(h[i]-l[i],Math.abs(h[i]-c[i-1]),Math.abs(l[i]-c[i-1])));}}return ema(tr,p);}
 function vwapRolling(h,l,c,v,p=30){const tp=c.map((x,i)=>(h[i]+l[i]+c[i])/3);const o=Array(c.length).fill(null);let pv=0,vv=0;for(let i=0;i<c.length;i++){pv+=tp[i]*v[i];vv+=v[i];if(i>=p){pv-=tp[i-p]*v[i-p];vv-=v[i-p];}if(i>=p-1)o[i]=vv>0?pv/vv:null;}return o;}
+// Session-anchored VWAP: resets each UTC day (t in seconds). Correct intraday VWAP.
+function vwapSession(t,h,l,c,v){const o=Array(c.length).fill(null);let pv=0,vv=0,day=null;for(let i=0;i<c.length;i++){const d=Math.floor(t[i]/86400);if(d!==day){day=d;pv=0;vv=0;}const tp=(h[i]+l[i]+c[i])/3;pv+=tp*v[i];vv+=v[i];o[i]=vv>0?pv/vv:null;}return o;}
 const last = a => { for(let i=a.length-1;i>=0;i--) if(a[i]!=null) return a[i]; return null; };
 
 // ---------- signal engine ----------
@@ -479,7 +494,7 @@ function renderTF(){
   TFS.forEach(([label,val])=>{
     const b=document.createElement("button");b.textContent=label;
     if(val===state.tf)b.className="active";
-    b.onclick=()=>{state.tf=val;renderTF();load();};
+    b.onclick=()=>{state.tf=val;localStorage.setItem("cdd_tf",val);renderTF();load();};
     tf.appendChild(b);
   });
 }
@@ -538,7 +553,7 @@ function renderAll(sym,tk,kl,dk,futRaw){
   const candles=t.map((x,i)=>({time:x,open:o[i],high:h[i],low:l[i],close:c[i]}));
   candleSeries.setData(candles);
   volSeries.setData(t.map((x,i)=>({time:x,value:v[i],color:c[i]>=o[i]?"rgba(22,199,132,.4)":"rgba(234,57,67,.4)"})));
-  const e9=ema(c,9),e21=ema(c,21),e50=ema(c,50),e200=ema(c,200),vw=vwapRolling(h,l,c,v,30);
+  const e9=ema(c,9),e21=ema(c,21),e50=ema(c,50),e200=ema(c,200),vw=vwapSession(t,h,l,c,v);
   const lineData=(arr)=>t.map((x,i)=>arr[i]==null?null:({time:x,value:arr[i]})).filter(Boolean);
   emaSeries.e9.setData(lineData(e9));emaSeries.e21.setData(lineData(e21));emaSeries.e50.setData(lineData(e50));emaSeries.e200.setData(lineData(e200));vwapSeries.setData(lineData(vw));
 
@@ -763,22 +778,35 @@ function renderPlan(sig,price,atrv){
      <div class="lvl tp"><span>Target 1 · 1R</span><b>$${fmt(t1)}</b></div>
      <div class="lvl tp"><span>Target 2 · 2R</span><b>$${fmt(t2)}</b></div>
      <div class="lvl tp"><span>Target 3 · 3R</span><b>$${fmt(t3)}</b></div>`;
-  window._plan={entry,stop};
+  window._plan={entry,stop,long};
 }
 
 function renderSize(price,atrv){
   const acct=+document.getElementById("acct").value||0;
   const rp=+document.getElementById("riskpct").value||0;
+  const lev=Math.max(1,+document.getElementById("lev").value||1);
   const riskAmt=acct*rp/100;
-  const stopDist=window._plan?Math.abs(window._plan.entry-window._plan.stop):1.5*atrv;
-  const units=stopDist>0?riskAmt/stopDist:0;
+  const entry=window._plan?window._plan.entry:price;
+  const long=window._plan?window._plan.long!==false:true;
+  const stopDistAbs=window._plan?Math.abs(window._plan.entry-window._plan.stop):1.5*atrv;
+  const units=stopDistAbs>0?riskAmt/stopDistAbs:0;
   const notional=units*price;
+  // estimated isolated-margin liquidation (0.5% maintenance margin, approximate — varies by exchange/tier)
+  const mmr=0.005;
+  const liq = long ? entry*(1-1/lev+mmr) : entry*(1+1/lev-mmr);
+  const liqDist=Math.abs(liq-entry)/entry*100;
+  const stopDistPct=entry>0?stopDistAbs/entry*100:0;
+  const marginNeeded=notional/lev;
+  const stopSafe = stopDistPct < liqDist;
   document.getElementById("sizeOut").innerHTML=
-    `Risking <b>$${fmt(riskAmt,2)}</b> with a $${fmt(stopDist)} stop →
-     position size <b>${fmt(units,4)} ${state.symbol}</b>
-     (≈ <b>$${fmt(notional,2)}</b> notional${notional>acct?`, <span class="down">${(notional/acct).toFixed(1)}× account — needs leverage</span>`:""}).`;
+    `Risking <b>$${fmt(riskAmt,2)}</b> with a $${fmt(stopDistAbs)} stop →
+     size <b>${fmt(units,4)} ${state.symbol}</b> (≈ <b>$${fmt(notional,2)}</b> notional, <b>$${fmt(marginNeeded,2)}</b> margin at ${lev}×).
+     <div style="margin-top:6px">At <b>${lev}×</b> (${long?'long':'short'}), est. liquidation ≈ <b class="down">$${fmt(liq)}</b> (${liqDist.toFixed(1)}% away).
+     ${stopSafe?`<span class="up">✓ Your ${stopDistPct.toFixed(1)}% stop triggers before liquidation.</span>`:`<span class="down">⚠ Your ${stopDistPct.toFixed(1)}% stop is BEYOND liquidation — you'd be liquidated first. Lower leverage or tighten the stop.</span>`}</div>
+     <div class="muted" style="margin-top:4px;font-size:11px">Liquidation is an estimate (0.5% maintenance margin, isolated) — your exchange's exact level varies by margin tier and fees.</div>`;
 }
-["acct","riskpct"].forEach(id=>document.addEventListener("input",e=>{if(e.target.id===id){renderSizeSafe();}}));
+function saveSizing(){try{localStorage.setItem("cdd_sizing",JSON.stringify({acct:document.getElementById("acct").value,riskpct:document.getElementById("riskpct").value,lev:document.getElementById("lev").value}));}catch(e){}}
+["acct","riskpct","lev"].forEach(id=>document.addEventListener("input",e=>{if(e.target.id===id){saveSizing();renderSizeSafe();}}));
 function renderSizeSafe(){ if(window._plan){ const p=window._plan.entry; renderSize(p, Math.abs(window._plan.entry-window._plan.stop)/1.5);} }
 
 // ---------- watchlist ----------
@@ -793,7 +821,7 @@ async function renderWatch(){
 function addWatch(){const s=state.symbol;if(!watch.includes(s)){watch.push(s);localStorage.setItem("cdd_watch",JSON.stringify(watch));renderWatch();}}
 
 // ---------- control ----------
-function setSymbol(s){state.symbol=(s||"").toUpperCase().replace(/USDT$/,"").replace(/[^A-Z0-9]/g,"");if(!state.symbol)return;document.getElementById("symIn").value=state.symbol;resetAlertState();load();loadSocial(state.symbol);loadContext(state.symbol);}
+function setSymbol(s){state.symbol=(s||"").toUpperCase().replace(/USDT$/,"").replace(/[^A-Z0-9]/g,"");if(!state.symbol)return;localStorage.setItem("cdd_symbol",state.symbol);document.getElementById("symIn").value=state.symbol;resetAlertState();load();loadSocial(state.symbol);loadContext(state.symbol);}
 function schedule(){if(state.timer)clearInterval(state.timer);if(document.getElementById("auto").checked){state.timer=setInterval(load,20000);}}
 
 document.getElementById("goBtn").onclick=()=>setSymbol(document.getElementById("symIn").value);
@@ -955,7 +983,19 @@ function showToast(msg){
 }
 let _actx;
 function beep(){try{_actx=_actx||new (window.AudioContext||window.webkitAudioContext)();const o=_actx.createOscillator(),g=_actx.createGain();o.connect(g);g.connect(_actx.destination);o.type="sine";o.frequency.value=660;g.gain.setValueAtTime(.0001,_actx.currentTime);g.gain.exponentialRampToValueAtTime(.15,_actx.currentTime+.02);g.gain.exponentialRampToValueAtTime(.0001,_actx.currentTime+.5);o.start();o.stop(_actx.currentTime+.5);}catch(e){}}
-function notify(msg){showToast(msg);beep();if(alerts.notify&&"Notification"in window&&Notification.permission==="granted"){try{new Notification("Crypto Day-Trading Dashboard",{body:msg});}catch(e){}}}
+function notify(msg){
+  showToast(msg);beep();
+  alertLog.unshift({m:msg,t:Date.now()}); alertLog=alertLog.slice(0,50); try{localStorage.setItem("cdd_alertlog",JSON.stringify(alertLog));}catch(e){}
+  renderAlertLog();
+  if(alerts.notify&&"Notification"in window&&Notification.permission==="granted"){try{new Notification("Crypto Day-Trading Dashboard",{body:msg});}catch(e){}}
+}
+function renderAlertLog(){
+  const el=document.getElementById("alertLog"); if(!el)return;
+  if(!alertLog.length){ el.innerHTML=''; return; }
+  el.innerHTML='<div class="small muted" style="margin:10px 0 4px;border-top:1px solid var(--line);padding-top:8px;display:flex;justify-content:space-between">Recent alerts <span id="clrLog" style="cursor:pointer;text-decoration:underline">clear</span></div>'+
+    alertLog.slice(0,8).map(a=>`<div class="small" style="padding:3px 0"><span class="muted">${new Date(a.t).toLocaleTimeString()}</span> ${esc(a.m)}</div>`).join("");
+  const clr=document.getElementById("clrLog"); if(clr)clr.onclick=()=>{alertLog=[];try{localStorage.removeItem("cdd_alertlog");}catch(e){}renderAlertLog();};
+}
 function evaluateAlerts(){
   const c=window.cur; if(!c)return; const S=state.symbol;
   if(alerts.signal){ if(c.label==="BUY"||c.label==="SELL"){ if(prevA.sigLabel!==c.label){prevA.sigLabel=c.label;notify(`${S}: signal is now ${c.label}`);} } else { prevA.sigLabel=c.label; } }
@@ -976,7 +1016,7 @@ async function loadFunding(){
   const dir=document.getElementById("fundDir").value;
   body.innerHTML=`<tr><td colspan="6" class="muted small">Loading funding across all perps…</td></tr>`;
   try{
-    const [pi,info,tk]=await Promise.allSettled([ fapi(`/fapi/v1/premiumIndex`), fapi(`/fapi/v1/fundingInfo`), fapi(`/fapi/v1/ticker/24hr`) ]);
+    const [pi,info,tk]=await Promise.allSettled([ fapiC(`/fapi/v1/premiumIndex`,30000), fapiC(`/fapi/v1/fundingInfo`,300000), fapiC(`/fapi/v1/ticker/24hr`,30000) ]);
     if(pi.status!=="fulfilled") throw new Error("no premiumIndex");
     // interval map: symbols not listed default to 8h
     const intervalMap={};
@@ -1081,7 +1121,7 @@ function renderAplus(){
 function pctSpan(v){ if(v==null||isNaN(v)) return '<span class="muted">—</span>'; return `<span class="${v>=0?'up':'down'}">${v>=0?'+':''}${v.toFixed(2)}%</span>`; }
 function rvolSpan(r){ if(r==null||isNaN(r)) return '<span class="muted">—</span>'; return `<span class="${r>=1.5?'up':'muted'}">${r.toFixed(2)}×</span>`; }
 async function enrichMomentum(symbol){
-  const kl=await fapi(`/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=52`);
+  const kl=await fapiC(`/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=52`,60000);
   const cl=kl.map(k=>+k[4]), vol=kl.map(k=>+k[5]), n=cl.length;
   const pc=(a,b)=> b? (a-b)/b*100 : null;
   const o={ m1h:n>=13?pc(cl[n-1],cl[n-13]):null, m2h:n>=25?pc(cl[n-1],cl[n-25]):null, m4h:n>=49?pc(cl[n-1],cl[n-49]):null, rvol:null };
@@ -1111,7 +1151,7 @@ async function scanSqueeze(){
   const body=document.getElementById("sqzBody");
   body.innerHTML=`<tr><td colspan="8" class="muted small">Finding crowded shorts, then checking momentum, volume & OI…</td></tr>`;
   try{
-    const [pi,info,tk]=await Promise.allSettled([ fapi(`/fapi/v1/premiumIndex`), fapi(`/fapi/v1/fundingInfo`), fapi(`/fapi/v1/ticker/24hr`) ]);
+    const [pi,info,tk]=await Promise.allSettled([ fapiC(`/fapi/v1/premiumIndex`,30000), fapiC(`/fapi/v1/fundingInfo`,300000), fapiC(`/fapi/v1/ticker/24hr`,30000) ]);
     if(pi.status!=="fulfilled") throw new Error("no data");
     const intervalMap={}; if(info.status==="fulfilled"&&Array.isArray(info.value)) info.value.forEach(x=>{if(x.fundingIntervalHours)intervalMap[x.symbol]=+x.fundingIntervalHours;});
     const chgMap={}; if(tk.status==="fulfilled"&&Array.isArray(tk.value)) tk.value.forEach(x=>{if(x.priceChangePercent!==""&&!isNaN(+x.priceChangePercent))chgMap[x.symbol]=+x.priceChangePercent;});
@@ -1123,8 +1163,8 @@ async function scanSqueeze(){
       await Promise.all(cand.slice(i,i+6).map(async c=>{
         try{
           const [kl,oih]=await Promise.all([
-            fapi(`/fapi/v1/klines?symbol=${c.symbol}&interval=5m&limit=52`),
-            fapi(`/futures/data/openInterestHist?symbol=${c.symbol}&period=5m&limit=24`).catch(()=>null)
+            fapiC(`/fapi/v1/klines?symbol=${c.symbol}&interval=5m&limit=52`,60000),
+            fapiC(`/futures/data/openInterestHist?symbol=${c.symbol}&period=5m&limit=24`,60000).catch(()=>null)
           ]);
           const cl=kl.map(k=>+k[4]), vol=kl.map(k=>+k[5]), n=cl.length;
           const pc=(a,b)=> b? (a-b)/b*100 : 0;
@@ -1155,7 +1195,7 @@ function evaluateSqueezeAlert(rows){
 }
 function updateSqueezeTimer(){
   if(sqzTimer){clearInterval(sqzTimer);sqzTimer=null;}
-  if(alerts.sqzOn) sqzTimer=setInterval(scanSqueeze,180000);   // every 3 min while enabled
+  sqzTimer=setInterval(scanSqueeze,180000);   // always refresh every 3 min (alerts fire only if toggled)
 }
 function renderSqueeze(rows){
   const body=document.getElementById("sqzBody");
@@ -1190,7 +1230,7 @@ async function scanMovers(){
   const dir=document.getElementById("movDir").value;
   body.innerHTML=`<tr><td colspan="8" class="muted small">Finding liquid perps on the move…</td></tr>`;
   try{
-    const tk=await fapi(`/fapi/v1/ticker/24hr`);
+    const tk=await fapiC(`/fapi/v1/ticker/24hr`,30000);
     let cand=tk.filter(x=>/USDT$/.test(x.symbol) && +x.quoteVolume>MOVERS_MIN_VOL && x.priceChangePercent!=="")
       .map(x=>({symbol:x.symbol,sym:x.symbol.replace(/USDT$/,""),chg:+x.priceChangePercent,qv:+x.quoteVolume,last:+x.lastPrice}));
     cand.sort((a,b)=> dir==="up" ? b.chg-a.chg : a.chg-b.chg);   // start from the day's movers
@@ -1217,7 +1257,7 @@ function evaluateVolAlert(rows){
 }
 function updateMoversTimer(){
   if(movTimer){clearInterval(movTimer);movTimer=null;}
-  if(alerts.volOn) movTimer=setInterval(scanMovers,180000);   // every 3 min while enabled
+  movTimer=setInterval(scanMovers,190000);   // always refresh (~3 min, staggered from squeeze)
 }
 function renderMovers(rows){
   const body=document.getElementById("movBody");
@@ -1236,7 +1276,10 @@ function renderMovers(rows){
 }
 
 // ================= BOOT =================
-initChart();renderTF();renderQuick();renderWatch();renderAlerts();renderAplus();
+// restore persisted symbol + sizing inputs
+document.getElementById("symIn").value=state.symbol;
+(function(){const s=JSON.parse(localStorage.getItem("cdd_sizing")||"null");if(s){if(s.acct!=null)document.getElementById("acct").value=s.acct;if(s.riskpct!=null)document.getElementById("riskpct").value=s.riskpct;if(s.lev!=null)document.getElementById("lev").value=s.lev;}})();
+initChart();renderTF();renderQuick();renderWatch();renderAlerts();renderAplus();renderAlertLog();
 load();loadSocial(state.symbol);loadContext(state.symbol);loadFunding();schedule();
 setInterval(()=>loadContext(state.symbol),60000);
 setInterval(loadFunding,120000);
