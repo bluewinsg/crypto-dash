@@ -357,18 +357,20 @@ async function api(path){
   }
   throw lastErr || new Error("network");
 }
-// spot-first, futures-fallback (perp-only coins like GWEI, 1000XEC have no spot pair)
+// spot-first, futures-fallback (perp-only coins have no spot pair; some networks block spot entirely)
+let spotDown=0;  // if spot infra is unreachable, skip it until this timestamp
+const spotFail=e=>{ if(!/HTTP \d/.test(e.message||"")) spotDown=Date.now()+120000; }; // network fail (not 4xx) → skip spot 2 min
 async function klines(pair,interval,limit){
-  try{ return await api(`/api/v3/klines?symbol=${pair}&interval=${interval}&limit=${limit}`); }
-  catch(e){ return await fapi(`/fapi/v1/klines?symbol=${pair}&interval=${interval}&limit=${limit}`); }
+  if(Date.now()>spotDown){ try{ return await api(`/api/v3/klines?symbol=${pair}&interval=${interval}&limit=${limit}`);}catch(e){ spotFail(e); } }
+  return await fapi(`/fapi/v1/klines?symbol=${pair}&interval=${interval}&limit=${limit}`);
 }
 async function ticker24(pair){
-  try{ return await api(`/api/v3/ticker/24hr?symbol=${pair}`); }
-  catch(e){ return await fapi(`/fapi/v1/ticker/24hr?symbol=${pair}`); }
+  if(Date.now()>spotDown){ try{ return await api(`/api/v3/ticker/24hr?symbol=${pair}`);}catch(e){ spotFail(e); } }
+  return await fapi(`/fapi/v1/ticker/24hr?symbol=${pair}`);
 }
 async function depthOf(pair,limit){
-  try{ return await api(`/api/v3/depth?symbol=${pair}&limit=${limit}`); }
-  catch(e){ return await fapi(`/fapi/v1/depth?symbol=${pair}&limit=${limit}`); }
+  if(Date.now()>spotDown){ try{ return await api(`/api/v3/depth?symbol=${pair}&limit=${limit}`);}catch(e){ spotFail(e); } }
+  return await fapi(`/fapi/v1/depth?symbol=${pair}&limit=${limit}`);
 }
 // short-lived cache so the funding/squeeze/movers scans don't refetch the same futures data
 const _fcache=new Map();
@@ -940,8 +942,8 @@ async function scanTop(){
     await Promise.all(chunk.map(async s=>{
       try{
         const [tk,kl]=await Promise.all([
-          api(`/api/v3/ticker/24hr?symbol=${s}${QUOTE}`),
-          api(`/api/v3/klines?symbol=${s}${QUOTE}&interval=1h&limit=240`)
+          ticker24(s+QUOTE),
+          klines(s+QUOTE,"1h",240)
         ]);
         const c=kl.map(x=>+x[4]); const sc=mtfScore(c);
         results.push({s,price:+tk.lastPrice,chg:+tk.priceChangePercent,label:sc.label,net:sc.net,rsi:sc.rsi??50});
