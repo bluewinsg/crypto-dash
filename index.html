@@ -238,6 +238,15 @@
       <div id="alertBox"></div>
       <div id="alertLog"></div>
     </div>
+    <div class="card">
+      <h3>Liquidations <span class="small muted">— live</span></h3>
+      <div class="small muted" style="display:flex;gap:6px;align-items:center;margin-bottom:6px">min $ <input id="liqMin" type="number" value="50000" style="width:100px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:5px;border-radius:6px"/></div>
+      <div id="liqBox"><div class="small muted">Connecting to live liquidation feed…</div></div>
+    </div>
+    <div class="card">
+      <h3>Volume profile <span class="small muted">— current chart</span></h3>
+      <div id="vpBox"><div class="small muted">Loading…</div></div>
+    </div>
   </div>
 
   <div class="card" style="margin-top:14px;border-color:var(--accent)">
@@ -406,6 +415,18 @@ function vwapRolling(h,l,c,v,p=30){const tp=c.map((x,i)=>(h[i]+l[i]+c[i])/3);con
 // Session-anchored VWAP: resets each UTC day (t in seconds). Correct intraday VWAP.
 function vwapSession(t,h,l,c,v){const o=Array(c.length).fill(null);let pv=0,vv=0,day=null;for(let i=0;i<c.length;i++){const d=Math.floor(t[i]/86400);if(d!==day){day=d;pv=0;vv=0;}const tp=(h[i]+l[i]+c[i])/3;pv+=tp*v[i];vv+=v[i];o[i]=vv>0?pv/vv:null;}return o;}
 const last = a => { for(let i=a.length-1;i>=0;i--) if(a[i]!=null) return a[i]; return null; };
+// Cumulative Volume Delta from taker-buy volume: delta = takerBuy - takerSell = 2*takerBuy - total
+function cvdSeries(v,tb){ const o=[]; let cum=0; for(let i=0;i<v.length;i++){ cum += (2*(tb[i]||0)-v[i]); o.push(cum); } return o; }
+function detectDiv(p,cv){ const n=Math.min(p.length,cv.length); if(n<12) return null; p=p.slice(-n); cv=cv.slice(-n); const h=Math.floor(n/2); const mx=a=>Math.max(...a), mn=a=>Math.min(...a);
+  if(mx(p.slice(h))>mx(p.slice(0,h)) && mx(cv.slice(h))<mx(cv.slice(0,h))) return "bearish";   // price higher-high, CVD lower-high
+  if(mn(p.slice(h))<mn(p.slice(0,h)) && mn(cv.slice(h))>mn(cv.slice(0,h))) return "bullish";   // price lower-low, CVD higher-low
+  return null; }
+// Volume-by-price: POC (max-volume level) + 70% value area
+function volProfile(h,l,c,v,bins){ bins=bins||24; const lo=Math.min(...l),hi=Math.max(...h); if(!(hi>lo)) return null; const step=(hi-lo)/bins; const b=Array(bins).fill(0);
+  for(let i=0;i<c.length;i++){ const tp=(h[i]+l[i]+c[i])/3; let k=Math.floor((tp-lo)/step); if(k<0)k=0; if(k>=bins)k=bins-1; b[k]+=v[i]; }
+  let poc=0; b.forEach((x,i)=>{if(x>b[poc])poc=i;}); const total=b.reduce((s,x)=>s+x,0)||1; let acc=b[poc],up=poc,dn=poc;
+  while(acc<total*0.7 && (up<bins-1||dn>0)){ const uv=up<bins-1?b[up+1]:-1, dv=dn>0?b[dn-1]:-1; if(uv>=dv){up++;acc+=b[up];}else{dn--;acc+=b[dn];} }
+  return {poc:lo+(poc+0.5)*step, vah:lo+(up+1)*step, val:lo+dn*step}; }
 
 // ---------- signal engine ----------
 function buildSignal(ind, price, fut){
@@ -446,6 +467,11 @@ function buildSignal(ind, price, fut){
   let vv=0;
   if(ind.volRatio>1.3) vv = trend||fast||m; // volume amplifies prevailing move
   add("Volume vs 20-avg", Math.sign(vv), 0.5, (ind.volRatio).toFixed(2)+"x avg"+(vv?" (confirms move)":""));
+
+  // Order flow (CVD)
+  add("Order flow (CVD)", ind.cvdRising?1:-1, 0.5, ind.cvdRising?"Buyers aggressive":"Sellers aggressive");
+  if(ind.cvdDiv==="bullish") add("CVD divergence", 1, 1, "Price weak but CVD rising — bullish");
+  else if(ind.cvdDiv==="bearish") add("CVD divergence", -1, 1, "Price up but CVD fading — bearish");
 
   // Futures / derivatives context
   if(fut){
@@ -538,7 +564,7 @@ async function load(){
 
 function renderAll(sym,tk,kl,dk,futRaw){
   // parse klines
-  const t=kl.map(k=>Math.floor(k[0]/1000)), o=kl.map(k=>+k[1]),h=kl.map(k=>+k[2]),l=kl.map(k=>+k[3]),c=kl.map(k=>+k[4]),v=kl.map(k=>+k[5]);
+  const t=kl.map(k=>Math.floor(k[0]/1000)), o=kl.map(k=>+k[1]),h=kl.map(k=>+k[2]),l=kl.map(k=>+k[3]),c=kl.map(k=>+k[4]),v=kl.map(k=>+k[5]),tb=kl.map(k=>+k[9]||0);
   const price=+tk.lastPrice;
   const chg=+tk.priceChangePercent;
   // header
@@ -563,11 +589,17 @@ function renderAll(sym,tk,kl,dk,futRaw){
   const rs=rsi(c,14),mc=macd(c),bb=bollinger(c,20,2),at=atr(h,l,c,14);
   const bbL=last(bb);const pctB=bbL?((price-bbL.lo)/(bbL.up-bbL.lo)):0.5;
   const volAvg=last(sma(v,20))||1;const volRatio=v[v.length-1]/volAvg;
+  const cvdArr=cvdSeries(v,tb); const cvdNow=cvdArr[cvdArr.length-1]||0, cvdRef=cvdArr[Math.max(0,cvdArr.length-7)]||0;
   const ind={
     e9:last(e9),e21:last(e21),e50:last(e50),e200:last(e200),vwap:last(vw),
     rsi:last(rs)??50,macdLine:last(mc.line)??0,macdSignal:last(mc.signal)??0,macdHist:last(mc.hist)??0,
-    bb:bbL,pctB,atr:last(at)??(price*0.01),volRatio
+    bb:bbL,pctB,atr:last(at)??(price*0.01),volRatio,
+    cvdRising: cvdNow>cvdRef, cvdDiv: detectDiv(c.slice(-40),cvdArr.slice(-40))
   };
+  // Volume profile + POC line on chart
+  const vp=volProfile(h,l,c,v); renderVP(vp,price);
+  if(window._pocLine){ try{candleSeries.removePriceLine(window._pocLine);}catch(e){} window._pocLine=null; }
+  if(vp){ try{ window._pocLine=candleSeries.createPriceLine({price:vp.poc,color:"#eab308",lineWidth:1,lineStyle:2,axisLabelVisible:true,title:"POC"}); }catch(e){} }
 
   // parse futures
   let fut=null;
@@ -612,7 +644,9 @@ function renderIndTable(ind,price){
     ["Bollinger %B", (ind.pctB*100).toFixed(0)+"%", ind.pctB>1?-1:ind.pctB<0?1:0],
     ["ATR (14)", "$"+fmt(ind.atr)+" ("+(ind.atr/price*100).toFixed(2)+"%)", 0],
     ["Volume vs 20-avg", ind.volRatio.toFixed(2)+"x", ind.volRatio>1.3?1:ind.volRatio<0.7?-1:0],
-  ];
+    ["Order flow (CVD)", ind.cvdRising?"Rising":"Falling", ind.cvdRising?1:-1],
+    ind.cvdDiv?["CVD divergence", ind.cvdDiv==="bullish"?"Bullish":"Bearish", ind.cvdDiv==="bullish"?1:-1]:null,
+  ].filter(Boolean);
   tb.innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td class="r">${r[1]}</td><td class="r">${readPill(r[2])}</td></tr>`).join("");
 }
 
@@ -823,7 +857,7 @@ async function renderWatch(){
 function addWatch(){const s=state.symbol;if(!watch.includes(s)){watch.push(s);localStorage.setItem("cdd_watch",JSON.stringify(watch));renderWatch();}}
 
 // ---------- control ----------
-function setSymbol(s){state.symbol=(s||"").toUpperCase().replace(/USDT$/,"").replace(/[^A-Z0-9]/g,"");if(!state.symbol)return;localStorage.setItem("cdd_symbol",state.symbol);document.getElementById("symIn").value=state.symbol;resetAlertState();load();loadSocial(state.symbol);loadContext(state.symbol);}
+function setSymbol(s){state.symbol=(s||"").toUpperCase().replace(/USDT$/,"").replace(/[^A-Z0-9]/g,"");if(!state.symbol)return;localStorage.setItem("cdd_symbol",state.symbol);document.getElementById("symIn").value=state.symbol;resetAlertState();load();loadSocial(state.symbol);loadContext(state.symbol);connectSymWS(state.symbol);}
 function schedule(){if(state.timer)clearInterval(state.timer);if(document.getElementById("auto").checked){state.timer=setInterval(load,20000);}}
 
 document.getElementById("goBtn").onclick=()=>setSymbol(document.getElementById("symIn").value);
@@ -1277,11 +1311,73 @@ function renderMovers(rows){
   body.querySelectorAll("tr").forEach(tr=>{tr.onclick=()=>setSymbol(tr.dataset.s);});
 }
 
+// ---- Volume profile render ----
+function renderVP(vp,price){
+  const box=document.getElementById("vpBox"); if(!box)return;
+  if(!vp){ box.innerHTML='<div class="small muted">n/a</div>'; return; }
+  box.innerHTML=
+    `<div class="kv"><span>Value area high</span><b class="${vp.vah>price?'down':'up'}">$${fmt(vp.vah)}</b></div>
+     <div class="kv"><span>Point of control</span><b style="color:#eab308">$${fmt(vp.poc)}</b></div>
+     <div class="kv"><span>Value area low</span><b class="${vp.val>price?'down':'up'}">$${fmt(vp.val)}</b></div>
+     <div class="small muted" style="margin-top:8px">${price>vp.poc?"Price above POC — buyers in control; POC is support to watch.":"Price below POC — sellers in control; POC is overhead resistance."} Inside the value area = fair value; a push outside often mean-reverts back.</div>`;
+}
+
+// ---- Live liquidations (WebSocket, keyless) ----
+let liqs=[], wsLiq;
+function connectLiq(){
+  try{ wsLiq=new WebSocket("wss://fstream.binance.com/market/stream?streams=!forceOrder@arr"); }
+  catch(e){ const b=document.getElementById("liqBox"); if(b)b.innerHTML='<div class="small muted">Live feed unavailable on this network.</div>'; return; }
+  wsLiq.onmessage=ev=>{ try{ const m=JSON.parse(ev.data); const o=(m.data&&m.data.o)||m.o; if(!o)return;
+    const px=(+o.ap)|| (+o.p); const notional=px*(+o.q); const side=o.S==="SELL"?"long":"short"; // SELL fill = long liquidated
+    liqs.unshift({t:Date.now(),sym:(o.s||"").replace(/USDT$/,""),side,notional,px}); if(liqs.length>300)liqs.length=300; renderLiqs();
+  }catch(e){} };
+  wsLiq.onclose=()=>{ setTimeout(connectLiq,4000); };
+  wsLiq.onerror=()=>{ try{wsLiq.close();}catch(e){} };
+}
+function renderLiqs(){
+  const box=document.getElementById("liqBox"); if(!box)return;
+  const minN=+document.getElementById("liqMin").value||0;
+  const cut=Date.now()-300000; let L=0,S=0; liqs.forEach(x=>{ if(x.t>=cut){ if(x.side==="long")L+=x.notional; else S+=x.notional; } });
+  const tot=L+S, lp=tot>0?L/tot*100:50;
+  const list=liqs.filter(x=>x.notional>=minN).slice(0,12);
+  box.innerHTML=
+    `<div class="kv"><span>Last 5m liquidations</span><b>$${fmt(tot,0)}</b></div>
+     <div class="depthbar"><div class="a" style="width:${lp}%"></div><div class="b" style="width:${100-lp}%"></div></div>
+     <div class="small muted" style="margin-bottom:6px"><span class="down">$${fmt(L,0)} longs</span> · <span class="up">$${fmt(S,0)} shorts</span> wiped</div>`+
+    (list.length?list.map(x=>`<div class="post" style="cursor:pointer" data-s="${x.sym}"><span class="tm">${esc(relTime(x.t))}</span><span class="u">${starPrefix(x.sym)}${esc(x.sym)}</span> <span class="pill ${x.side==="short"?'p-bull':'p-bear'}">${x.side==="short"?'SHORT':'LONG'} liq</span> <span class="b">$${fmt(x.notional,0)} @ $${fmt(x.px)}</span></div>`).join(""):'<div class="small muted">Waiting for liquidations above your filter…</div>');
+  box.querySelectorAll(".post[data-s]").forEach(el=>el.onclick=()=>setSymbol(el.dataset.s));
+}
+
+// ---- Live price + order book (WebSocket per symbol) ----
+let wsTicker,wsDepth;
+function connectSymWS(sym){
+  const s=(sym+"usdt").toLowerCase();
+  [wsTicker,wsDepth].forEach(w=>{ if(w){ try{ w.onclose=null; w.close(); }catch(e){} } });
+  try{
+    wsTicker=new WebSocket(`wss://fstream.binance.com/market/stream?streams=${s}@ticker`);
+    wsTicker.onmessage=ev=>{ try{ const m=JSON.parse(ev.data); const d=m.data||m; if(d&&d.c!=null && sym.toLowerCase()===state.symbol.toLowerCase()) liveTicker(d); }catch(e){} };
+    wsTicker.onerror=()=>{ try{wsTicker.close();}catch(e){} };
+  }catch(e){}
+  try{
+    wsDepth=new WebSocket(`wss://fstream.binance.com/public/stream?streams=${s}@depth20@500ms`);
+    wsDepth.onmessage=ev=>{ try{ const m=JSON.parse(ev.data); const d=m.data||m; const bids=d.b||d.bids, asks=d.a||d.asks; if(bids&&asks && sym.toLowerCase()===state.symbol.toLowerCase()) renderDepth({bids,asks}); }catch(e){} };
+    wsDepth.onerror=()=>{ try{wsDepth.close();}catch(e){} };
+  }catch(e){}
+}
+function liveTicker(d){
+  const price=+d.c, chg=+d.P;
+  const pe=document.getElementById("price"); if(pe) pe.textContent="$"+fmt(price);
+  const ce=document.getElementById("change"); if(ce){ ce.textContent=pct(chg)+" (24h)"; ce.className="chg "+(chg>0?"up":chg<0?"down":"flat"); }
+  if(window.cur){ window.cur.price=price; evaluateAlerts(); }   // live price → alerts fire in real time
+}
+
 // ================= BOOT =================
 // restore persisted symbol + sizing inputs
 document.getElementById("symIn").value=state.symbol;
 (function(){const s=JSON.parse(localStorage.getItem("cdd_sizing")||"null");if(s){if(s.acct!=null)document.getElementById("acct").value=s.acct;if(s.riskpct!=null)document.getElementById("riskpct").value=s.riskpct;if(s.lev!=null)document.getElementById("lev").value=s.lev;}})();
 initChart();renderTF();renderQuick();renderWatch();renderAlerts();renderAplus();renderAlertLog();
+connectLiq();connectSymWS(state.symbol);
+document.getElementById("liqMin").addEventListener("input",renderLiqs);
 load();loadSocial(state.symbol);loadContext(state.symbol);loadFunding();schedule();
 setInterval(()=>loadContext(state.symbol),60000);
 setInterval(loadFunding,120000);
