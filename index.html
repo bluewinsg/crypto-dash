@@ -248,6 +248,10 @@
       <h3>Volume profile <span class="small muted">— current chart</span></h3>
       <div id="vpBox"><div class="small muted">Loading…</div></div>
     </div>
+    <div class="card">
+      <h3>Cross-exchange <span class="small muted">— funding &amp; OI</span></h3>
+      <div id="cxBox"><div class="small muted">Loading…</div></div>
+    </div>
   </div>
 
   <div class="card" style="margin-top:14px;border-color:var(--accent)">
@@ -933,6 +937,7 @@ async function loadContext(sym){
   const fng=res[5].status==="fulfilled"?res[5].value.data&&res[5].value.data[0]:null;
   const glob=res[6].status==="fulfilled"?res[6].value.data:null;
   renderRegime({fng,glob,corr,beta,isBTC:sym==="BTC"});
+  loadCrossEx(sym);
 }
 function fngColor(v){v=+v;return v<25?"var(--red)":v<45?"var(--amber)":v<=55?"var(--muted)":v<75?"var(--green)":"var(--green)";}
 function renderRegime(r){
@@ -1382,6 +1387,41 @@ function liveTicker(d){
   const pe=document.getElementById("price"); if(pe) pe.textContent="$"+fmt(price);
   const ce=document.getElementById("change"); if(ce){ ce.textContent=pct(chg)+" (24h)"; ce.className="chg "+(chg>0?"up":chg<0?"down":"flat"); }
   if(window.cur){ window.cur.price=price; evaluateAlerts(); }   // live price → alerts fire in real time
+}
+
+// ---- Cross-exchange funding & OI (Binance / Bybit / OKX / Hyperliquid) ----
+let _hl={t:0,v:null};
+async function hlCtxs(){ if(_hl.v && Date.now()-_hl.t<30000) return _hl.v;
+  const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({type:"metaAndAssetCtxs"})});
+  const j=await r.json(); _hl={t:Date.now(),v:j}; return j; }
+async function hlCoin(sym){ const j=await hlCtxs(); const u=j[0].universe; let i=-1; for(let k=0;k<u.length;k++){ if(u[k].name===sym){i=k;break;} } if(i<0) throw new Error("na");
+  const c=j[1][i]; const mk=(+c.markPx)||(+c.oraclePx)||0; return {ex:"Hyperliquid",fr:+c.funding,ivH:1,oiUsd:(+c.openInterest)*mk}; }
+async function loadCrossEx(sym){
+  const box=document.getElementById("cxBox"); if(!box)return;
+  const S=(sym||"").toUpperCase();
+  const jobs=[
+    (async()=>{ const d=await fapiC(`/fapi/v1/premiumIndex?symbol=${S}USDT`,30000); if(d.lastFundingRate===undefined||isNaN(+d.lastFundingRate))throw new Error("na");
+      const row={ex:"Binance",fr:+d.lastFundingRate,ivH:8,oiUsd:null}; try{ const oi=await fapiC(`/fapi/v1/openInterest?symbol=${S}USDT`,30000); row.oiUsd=(+oi.openInterest)*(+d.markPrice); }catch(e){} return row; })(),
+    (async()=>{ const j=await jget(`https://api.bybit.com/v5/market/tickers?category=linear&symbol=${S}USDT`); const x=j.result&&j.result.list&&j.result.list[0]; if(!x||x.fundingRate===""||x.fundingRate==null)throw new Error("na"); return {ex:"Bybit",fr:+x.fundingRate,ivH:8,oiUsd:+x.openInterestValue}; })(),
+    (async()=>{ const [f,o]=await Promise.all([jget(`https://www.okx.com/api/v5/public/funding-rate?instId=${S}-USDT-SWAP`),jget(`https://www.okx.com/api/v5/public/open-interest?instId=${S}-USDT-SWAP`)]); if(!f.data||!f.data[0])throw new Error("na"); return {ex:"OKX",fr:+f.data[0].fundingRate,ivH:8,oiUsd:(o.data&&o.data[0])?+o.data[0].oiUsd:null}; })(),
+    (async()=>{ return await hlCoin(S); })()
+  ];
+  const res=await Promise.allSettled(jobs);
+  renderCrossEx(res.map(r=>r.status==="fulfilled"?r.value:null).filter(Boolean));
+}
+function renderCrossEx(rows){
+  const box=document.getElementById("cxBox"); if(!box)return;
+  const ok=rows.filter(r=>r&&!isNaN(r.fr));
+  if(!ok.length){ box.innerHTML='<div class="small muted">No cross-exchange perp data for this coin.</div>'; return; }
+  const neg=ok.filter(r=>r.fr<0).length, totalOI=ok.reduce((s,r)=>s+(r.oiUsd||0),0);
+  const body=ok.map(r=>{ const ann=r.fr*(24/r.ivH)*365*100; return `<tr><td>${r.ex}</td><td class="r ${r.fr<0?'down':'up'}">${ann>=0?'+':''}${ann.toFixed(0)}%</td><td class="r muted">${r.oiUsd?'$'+fmt(r.oiUsd,0):'—'}</td></tr>`; }).join("");
+  let read;
+  if(ok.length<2) read=`Only on <b>${ok.length}</b> venue — thin cross-exchange coverage.`;
+  else if(neg===ok.length) read=`Funding negative on <b>all ${ok.length}</b> venues — <span class="down">market-wide crowded short</span> (higher-conviction squeeze).`;
+  else if(neg===0) read=`No venue shows negative funding — not a crowded short right now.`;
+  else read=`Negative on <b>${neg}/${ok.length}</b> venues — <span class="muted">mixed; not fully market-wide.</span>`;
+  box.innerHTML=`<table><thead><tr><th>Venue</th><th class="r">Funding (annual.)</th><th class="r">OI</th></tr></thead><tbody>${body}</tbody></table>`+
+    `<div class="small muted" style="margin-top:8px">${read} Aggregate OI <b>$${fmt(totalOI,0)}</b>. Annualized assumes each venue's standard interval (Hyperliquid 1h, others 8h).</div>`;
 }
 
 // ================= BOOT =================
