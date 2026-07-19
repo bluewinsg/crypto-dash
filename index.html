@@ -587,7 +587,9 @@ function renderAll(sym,tk,kl,dk,futRaw){
      <div>24h Vol <b>$${fmt(+tk.quoteVolume,0)}</b></div>
      <div>Range pos <b>${rangePos(+tk.lowPrice,+tk.highPrice,price)}%</b></div>`;
 
-  // chart data
+  // chart data (auto price precision so sub-cent coins show real values, not 0.00)
+  const dp = price>=1000?2 : price>=1?3 : price>=0.01?5 : price>=0.0001?7 : 9;
+  candleSeries.applyOptions({priceFormat:{type:"price",precision:dp,minMove:Math.pow(10,-dp)}});
   const candles=t.map((x,i)=>({time:x,open:o[i],high:h[i],low:l[i],close:c[i]}));
   candleSeries.setData(candles);
   volSeries.setData(t.map((x,i)=>({time:x,value:v[i],color:c[i]>=o[i]?"rgba(22,199,132,.4)":"rgba(234,57,67,.4)"})));
