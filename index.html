@@ -336,6 +336,25 @@
     <div class="small muted" style="margin-top:8px"><b>RVOL</b> = current hour's volume vs its recent hourly average (2×+ = unusual activity happening now). The <b>1h / 2h / 4h</b> columns show whether the move is accelerating (1h a big share of 4h) or fading. Ranked by an interest score blending directional momentum × volume surge; liquid perps only ($5M+ 24h volume). The cleanest long entry is price up + high RVOL + rising OI. Click a row to load it above.</div>
   </div>
 
+  <div class="card" style="margin-top:14px">
+    <h3>Trade journal <span class="small muted">— log &amp; review your trades</span></h3>
+    <div id="jrnStats" class="small" style="margin-bottom:10px"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+      <div><label class="small muted">Coin</label><br><input id="jSym" style="width:80px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px;border-radius:6px;text-transform:uppercase"/></div>
+      <div><label class="small muted">Side</label><br><select id="jSide" style="background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px;border-radius:6px"><option value="long">long</option><option value="short">short</option></select></div>
+      <div><label class="small muted">Entry</label><br><input id="jEntry" type="number" step="any" style="width:110px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px;border-radius:6px"/></div>
+      <div><label class="small muted">Exit</label><br><input id="jExit" type="number" step="any" style="width:110px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px;border-radius:6px"/></div>
+      <div><label class="small muted">Size (units)</label><br><input id="jSize" type="number" step="any" style="width:120px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px;border-radius:6px"/></div>
+      <div><label class="small muted">Stop (opt, for R)</label><br><input id="jStop" type="number" step="any" style="width:120px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px;border-radius:6px"/></div>
+      <button class="btn" id="jAdd">+ Log trade</button>
+    </div>
+    <table class="scan-table">
+      <thead><tr><th>Date</th><th>Coin</th><th>Side</th><th class="r">Entry</th><th class="r">Exit</th><th class="r">P&amp;L</th><th class="r">R</th><th></th></tr></thead>
+      <tbody id="jBody"></tbody>
+    </table>
+    <div class="small muted" style="margin-top:8px">Log a trade after you close it (enter a stop to get the R-multiple). Win rate, net P&amp;L and profit factor build up above — that's how you learn whether your edge is real. Stored only in this browser.</div>
+  </div>
+
   <div class="footer">
     Live market data from Binance's public API (spot + futures). Social sentiment from StockTwits and CoinGecko community data (refreshed when you change coins). Prices are for USDT spot pairs.
     This tool is for informational and educational purposes only and is <b>not financial advice</b>. The aggregated
@@ -355,6 +374,8 @@ const TFS = [["1m","1m"],["5m","5m"],["15m","15m"],["1h","1h"],["4h","4h"],["1d"
 
 let state = { symbol:(localStorage.getItem("cdd_symbol")||"BTC"), tf:(localStorage.getItem("cdd_tf")||DEFAULT_TF), timer:null };
 let alertLog=JSON.parse(localStorage.getItem("cdd_alertlog")||"[]");
+let aplusTrack=JSON.parse(localStorage.getItem("cdd_aplus_track")||"[]");
+let journal=JSON.parse(localStorage.getItem("cdd_journal")||"[]");
 let chart, candleSeries, volSeries, emaSeries={}, vwapSeries;
 let watch = JSON.parse(localStorage.getItem("cdd_watch")||JSON.stringify(["BTC","ETH","SOL"]));
 
@@ -1102,7 +1123,7 @@ async function loadFunding(){
       });
     all.sort((a,b)=> dir==="neg" ? a.ann-b.ann : b.ann-a.ann);   // rank by normalized annualized
     const top=all.slice(0,20);
-    if(dir==="neg") top.forEach(r=>{ if(r.ann<0) markSignal(r.sym,"negfund",{ann:r.ann}); });
+    if(dir==="neg") top.forEach(r=>{ if(r.ann<0) markSignal(r.sym,"negfund",{ann:r.ann,px:r.mark}); });
     renderFunding(top,true);          // fast paint (prev pending)
     evaluateFundingAlert(all);
     await attachPrev(top);            // fetch last settled rate for shown coins
@@ -1173,13 +1194,80 @@ function renderAplus(){
   rows.sort((a,b)=> b.k.length-a.k.length || (b.rvol||0)-(a.rvol||0));
   const box=document.getElementById("aplusBox");
   if(!box)return;
-  if(!rows.length){ box.innerHTML='<div class="small muted">No multi-signal setups right now. Coins that appear in 2+ of the funding / squeeze / movers radars will show here.</div>'; return; }
+  trackAplus(rows.map(r=>r.sym));
+  const st=aplusStats();
+  const foot = st
+    ? `<div class="small muted" style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">Track record — <b>${st.n}</b> past A+ setups: <b class="up">${st.p1.toFixed(0)}%</b> reached +1%, <b class="up">${st.p2.toFixed(0)}%</b> reached +2% within 1h · avg peak <b class="up">+${st.avg.toFixed(1)}%</b>${st.n3>=3?` · 3-signal setups avg <b class="up">+${st.avg3.toFixed(1)}%</b>`:''}.</div>`
+    : `<div class="small muted" style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">Track record builds automatically — first results appear ~1h after A+ coins are flagged.</div>`;
+  if(!rows.length){ box.innerHTML='<div class="small muted">No multi-signal setups right now. Coins that appear in 2+ of the funding / squeeze / movers radars will show here.</div>'+foot; return; }
   const badge=k=> k==="negfund"?'<span class="pill p-bear">💸 Neg funding</span>':k==="squeeze"?'<span class="pill p-bull">🔥 Squeeze</span>':'<span class="pill p-bull">📈 Volume</span>';
   box.innerHTML=rows.slice(0,10).map(r=>`<div class="aplus-row" data-s="${r.sym}">
       <span><b>${r.k.length>=3?'⭐ ':''}${r.sym}</b> &nbsp;${r.k.map(badge).join(" ")}</span>
       <span class="muted small">${r.rvol?('RVOL '+r.rvol.toFixed(2)+'× '):''}${r.m1h!=null?((r.m1h>=0?'+':'')+r.m1h.toFixed(2)+'% 1h'):''}</span>
-    </div>`).join("");
+    </div>`).join("")+foot;
   box.querySelectorAll(".aplus-row").forEach(el=>el.onclick=()=>setSymbol(el.dataset.s));
+}
+// ---- A+ outcome tracker (forward-test) ----
+function saveAplusTrack(){ try{localStorage.setItem("cdd_aplus_track",JSON.stringify(aplusTrack));}catch(e){} }
+function trackAplus(syms){
+  const now=Date.now(); let changed=false;
+  syms.forEach(sym=>{
+    if(aplusTrack.some(e=>e.sym===sym && now-e.t<3600000)) return;   // one entry per coin per hour
+    const px=sig[sym] && sig[sym].px; if(!px||isNaN(+px)) return;
+    aplusTrack.unshift({sym,t:now,px:+px,kinds:freshKinds(sym).length,evald:false}); changed=true;
+  });
+  if(changed){ if(aplusTrack.length>300)aplusTrack.length=300; saveAplusTrack(); }
+}
+async function evalAplusTrack(){
+  const now=Date.now(); const pending=aplusTrack.filter(e=>!e.evald && now-e.t>=3600000); if(!pending.length)return; let changed=false;
+  for(let i=0;i<pending.length;i+=5){
+    await Promise.all(pending.slice(i,i+5).map(async e=>{
+      try{ const kl=await fapiC(`/fapi/v1/klines?symbol=${e.sym}USDT&interval=5m&limit=20`,60000);
+        let maxH=e.px; kl.forEach(k=>{ const ot=+k[0]; if(ot>=e.t && ot<=e.t+3600000){ const hi=+k[2]; if(hi>maxH)maxH=hi; } });
+        e.maxFav=(maxH-e.px)/e.px*100; e.evald=true; changed=true;
+      }catch(err){}
+    }));
+  }
+  if(changed){ saveAplusTrack(); renderAplus(); }
+}
+function aplusStats(){
+  const ev=aplusTrack.filter(e=>e.evald && isFinite(e.maxFav)); if(!ev.length) return null;
+  const n=ev.length, avg=ev.reduce((s,e)=>s+e.maxFav,0)/n;
+  const three=ev.filter(e=>e.kinds>=3);
+  return {n, p1:ev.filter(e=>e.maxFav>=1).length/n*100, p2:ev.filter(e=>e.maxFav>=2).length/n*100, avg,
+          n3:three.length, avg3: three.length?three.reduce((s,e)=>s+e.maxFav,0)/three.length:0};
+}
+// ---- Trade journal ----
+function saveJournal(){ try{localStorage.setItem("cdd_journal",JSON.stringify(journal));}catch(e){} }
+function addTrade(){
+  const sym=((document.getElementById("jSym").value||state.symbol)||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+  const side=document.getElementById("jSide").value;
+  const entry=+document.getElementById("jEntry").value, exit=+document.getElementById("jExit").value, size=+document.getElementById("jSize").value, stop=+document.getElementById("jStop").value||0;
+  if(!entry||!exit||!size){ showToast("Enter entry, exit and size to log a trade"); return; }
+  const dir=side==="long"?1:-1, pnl=(exit-entry)*size*dir, risk=stop?Math.abs(entry-stop)*size:0, r=risk?pnl/risk:null;
+  journal.unshift({sym,side,entry,exit,size,stop,pnl,r,t:Date.now()}); if(journal.length>500)journal.length=500;
+  saveJournal(); renderJournal();
+  ["jEntry","jExit","jSize","jStop"].forEach(id=>document.getElementById(id).value="");
+}
+function renderJournal(){
+  const body=document.getElementById("jBody"); if(!body)return;
+  body.innerHTML = journal.length ? journal.slice(0,60).map((tr,i)=>`<tr>
+      <td class="muted">${new Date(tr.t).toLocaleDateString()}</td>
+      <td><b>${esc(tr.sym)}</b></td>
+      <td class="${tr.side==='long'?'up':'down'}">${tr.side}</td>
+      <td class="r">$${fmt(tr.entry)}</td><td class="r">$${fmt(tr.exit)}</td>
+      <td class="r ${tr.pnl>=0?'up':'down'}"><b>${tr.pnl>=0?'+':''}$${fmt(tr.pnl,2)}</b></td>
+      <td class="r ${tr.r==null?'muted':tr.r>=0?'up':'down'}">${tr.r==null?'—':(tr.r>=0?'+':'')+tr.r.toFixed(2)+'R'}</td>
+      <td class="r"><button class="del" data-i="${i}" style="background:none;border:none;color:var(--muted);cursor:pointer">✕</button></td>
+    </tr>`).join("") : `<tr><td colspan="8" class="muted small">No trades logged yet. After you close a position, log it above to build your win-rate.</td></tr>`;
+  body.querySelectorAll("[data-i]").forEach(b=>b.onclick=()=>{ journal.splice(+b.dataset.i,1); saveJournal(); renderJournal(); });
+  const el=document.getElementById("jrnStats"); if(!el)return;
+  if(journal.length){
+    const n=journal.length, wins=journal.filter(t=>t.pnl>0).length, total=journal.reduce((s,t)=>s+t.pnl,0);
+    const gw=journal.filter(t=>t.pnl>0).reduce((s,t)=>s+t.pnl,0), gl=Math.abs(journal.filter(t=>t.pnl<0).reduce((s,t)=>s+t.pnl,0));
+    const pf= gl>0?gw/gl:(gw>0?Infinity:0); const rs=journal.filter(t=>t.r!=null); const avgR=rs.length?rs.reduce((s,t)=>s+t.r,0)/rs.length:null;
+    el.innerHTML=`<b>${n}</b> trades · win rate <b class="${wins/n>=0.5?'up':'down'}">${(wins/n*100).toFixed(0)}%</b> · net <b class="${total>=0?'up':'down'}">${total>=0?'+':''}$${fmt(total,2)}</b> · profit factor <b>${isFinite(pf)?pf.toFixed(2):'∞'}</b>${avgR!=null?` · avg <b class="${avgR>=0?'up':'down'}">${avgR>=0?'+':''}${avgR.toFixed(2)}R</b>`:''}`;
+  } else el.innerHTML="";
 }
 
 // ---- shared momentum helpers ----
@@ -1244,7 +1332,7 @@ async function scanSqueeze(){
     }
     cand.forEach(c=>{c.score=squeezeScore(c);c.tag=squeezeTag(c);});
     cand.sort((a,b)=>b.score-a.score);
-    cand.forEach(c=>{ if((c.m1h||0)>0) markSignal(c.sym,"squeeze",{rvol:c.rvol,m1h:c.m1h}); });
+    cand.forEach(c=>{ if((c.m1h||0)>0) markSignal(c.sym,"squeeze",{rvol:c.rvol,m1h:c.m1h,px:c.mark}); });
     evaluateSqueezeAlert(cand);
     renderSqueeze(cand.slice(0,15));
     renderAplus();
@@ -1305,7 +1393,7 @@ async function scanMovers(){
     }
     cand.forEach(c=>c.interest=moversScore(c,dir));
     cand.sort((a,b)=>b.interest-a.interest);
-    if(dir==="up") cand.forEach(c=>{ if((c.rvol||0)>=1.5 && (c.m1h||0)>0) markSignal(c.sym,"movers",{rvol:c.rvol,m1h:c.m1h}); });
+    if(dir==="up") cand.forEach(c=>{ if((c.rvol||0)>=1.5 && (c.m1h||0)>0) markSignal(c.sym,"movers",{rvol:c.rvol,m1h:c.m1h,px:c.last}); });
     evaluateVolAlert(cand);
     renderMovers(cand.slice(0,15));
     renderAplus();
@@ -1439,7 +1527,10 @@ function renderCrossEx(rows){
 // restore persisted symbol + sizing inputs
 document.getElementById("symIn").value=state.symbol;
 (function(){const s=JSON.parse(localStorage.getItem("cdd_sizing")||"null");if(s){if(s.acct!=null)document.getElementById("acct").value=s.acct;if(s.riskpct!=null)document.getElementById("riskpct").value=s.riskpct;if(s.lev!=null)document.getElementById("lev").value=s.lev;}})();
-initChart();renderTF();renderQuick();renderWatch();renderAlerts();renderAplus();renderAlertLog();
+initChart();renderTF();renderQuick();renderWatch();renderAlerts();renderAplus();renderAlertLog();renderJournal();
+document.getElementById("jSym").value=state.symbol;
+document.getElementById("jAdd").onclick=addTrade;
+evalAplusTrack(); setInterval(evalAplusTrack,120000);
 connectLiq();connectSymWS(state.symbol);
 document.getElementById("liqMin").addEventListener("input",renderLiqs);
 load();loadSocial(state.symbol);loadContext(state.symbol);loadFunding();schedule();
