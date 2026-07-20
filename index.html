@@ -814,25 +814,28 @@ function renderPlan(sig,price,atrv){
   const long = sig.label!=="SELL"; // plan a long unless signal is SELL (then show short plan)
   const box=document.getElementById("planBox");
   if(sig.label==="NEUTRAL"){
-    box.innerHTML=`<div class="lvl entry"><span>No high-conviction setup</span><b>Wait</b></div>`;
     document.getElementById("planNote").textContent="Signal is neutral — the plan below shows illustrative levels only. Prefer to wait for alignment.";
   } else {
     document.getElementById("planNote").innerHTML="Illustrative "+(long?"long":"short")+" plan using 1.5×ATR stop and 1R/2R/3R targets. ATR = $"+fmt(atrv)+".";
   }
-  const stopDist=1.5*atrv;
-  const entry=price;
+  const stopDist=1.5*atrv, entry=price;
   const stop = long? entry-stopDist : entry+stopDist;
   const t1 = long? entry+stopDist : entry-stopDist;
   const t2 = long? entry+2*stopDist : entry-2*stopDist;
   const t3 = long? entry+3*stopDist : entry-3*stopDist;
+  const acct=+(document.getElementById("acct")||{}).value||0, rp=+(document.getElementById("riskpct")||{}).value||0;
+  const riskAmt=acct*rp/100;
+  const win=n=> riskAmt>0?` <span class="up">+$${fmt(riskAmt*n,2)}</span>`:"";
   box.innerHTML=
     `<div class="lvl entry"><span>Entry (market)</span><b>$${fmt(entry)}</b></div>
-     <div class="lvl sl"><span>Stop-loss (1.5×ATR)</span><b>$${fmt(stop)} (${((stop-entry)/entry*100).toFixed(2)}%)</b></div>
-     <div class="lvl tp"><span>Target 1 · 1R</span><b>$${fmt(t1)}</b></div>
-     <div class="lvl tp"><span>Target 2 · 2R</span><b>$${fmt(t2)}</b></div>
-     <div class="lvl tp"><span>Target 3 · 3R</span><b>$${fmt(t3)}</b></div>`;
+     <div class="lvl sl"><span>Stop-loss (1.5×ATR)</span><b>$${fmt(stop)} (${((stop-entry)/entry*100).toFixed(2)}%)${riskAmt>0?` <span class="down">−$${fmt(riskAmt,2)}</span>`:""}</b></div>
+     <div class="lvl tp"><span>Target 1 · 1R</span><b>$${fmt(t1)}${win(1)}</b></div>
+     <div class="lvl tp"><span>Target 2 · 2R</span><b>$${fmt(t2)}${win(2)}</b></div>
+     <div class="lvl tp"><span>Target 3 · 3R</span><b>$${fmt(t3)}${win(3)}</b></div>`;
   window._plan={entry,stop,long};
+  window._planCtx={label:sig.label,price,atrv};
 }
+function refreshPlan(){ if(window._planCtx) renderPlan({label:window._planCtx.label}, window._planCtx.price, window._planCtx.atrv); }
 
 function renderSize(price,atrv){
   const acct=+document.getElementById("acct").value||0;
@@ -854,12 +857,20 @@ function renderSize(price,atrv){
   document.getElementById("sizeOut").innerHTML=
     `Risking <b>$${fmt(riskAmt,2)}</b> with a $${fmt(stopDistAbs)} stop →
      size <b>${fmt(units,4)} ${state.symbol}</b> (≈ <b>$${fmt(notional,2)}</b> notional, <b>$${fmt(marginNeeded,2)}</b> margin at ${lev}×).
-     <div style="margin-top:6px">At <b>${lev}×</b> (${long?'long':'short'}), est. liquidation ≈ <b class="down">$${fmt(liq)}</b> (${liqDist.toFixed(1)}% away).
+     ${rp>2?`<div class="small" style="color:var(--amber);margin-top:6px">⚠ ${rp}% risk per trade is aggressive — most traders keep it to 1–2%.</div>`:``}
+     <div style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
+       <div class="kv"><span>Profit at Target 1 · 1R</span><b class="up">+$${fmt(riskAmt,2)}</b></div>
+       <div class="kv"><span>Profit at Target 2 · 2R</span><b class="up">+$${fmt(riskAmt*2,2)}</b></div>
+       <div class="kv"><span>Profit at Target 3 · 3R</span><b class="up">+$${fmt(riskAmt*3,2)}</b></div>
+       <div class="kv"><span>Loss if stopped out</span><b class="down">−$${fmt(riskAmt,2)}</b></div>
+       <div class="muted small" style="margin-top:6px">Return on your $${fmt(marginNeeded,2)} margin — T1 +${(marginNeeded>0?riskAmt/marginNeeded*100:0).toFixed(0)}%, T2 +${(marginNeeded>0?riskAmt*2/marginNeeded*100:0).toFixed(0)}%, T3 +${(marginNeeded>0?riskAmt*3/marginNeeded*100:0).toFixed(0)}%.</div>
+     </div>
+     <div style="margin-top:8px">At <b>${lev}×</b> (${long?'long':'short'}), est. liquidation ≈ <b class="down">$${fmt(liq)}</b> (${liqDist.toFixed(1)}% away).
      ${stopSafe?`<span class="up">✓ Your ${stopDistPct.toFixed(1)}% stop triggers before liquidation.</span>`:`<span class="down">⚠ Your ${stopDistPct.toFixed(1)}% stop is BEYOND liquidation — you'd be liquidated first. Lower leverage or tighten the stop.</span>`}</div>
      <div class="muted" style="margin-top:4px;font-size:11px">Liquidation is an estimate (0.5% maintenance margin, isolated) — your exchange's exact level varies by margin tier and fees.</div>`;
 }
 function saveSizing(){try{localStorage.setItem("cdd_sizing",JSON.stringify({acct:document.getElementById("acct").value,riskpct:document.getElementById("riskpct").value,lev:document.getElementById("lev").value}));}catch(e){}}
-["acct","riskpct","lev"].forEach(id=>document.addEventListener("input",e=>{if(e.target.id===id){saveSizing();renderSizeSafe();}}));
+["acct","riskpct","lev"].forEach(id=>document.addEventListener("input",e=>{if(e.target.id===id){saveSizing();renderSizeSafe();refreshPlan();}}));
 function renderSizeSafe(){ if(window._plan){ const p=window._plan.entry; renderSize(p, Math.abs(window._plan.entry-window._plan.stop)/1.5);} }
 
 // ---------- watchlist ----------
